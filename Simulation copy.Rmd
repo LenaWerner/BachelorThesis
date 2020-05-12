@@ -1,0 +1,299 @@
+---
+title: "Simulation"
+output: html_notebook
+---
+
+Preperation
+
+```{r}
+library(stats)
+library(PearsonDS)
+library(dplyr)
+library(magicfor)
+library(gsl)
+```
+Design
+```{r}
+sample1 <- c(15,20,65,100)
+sample2 <- c(20,25,100,145)
+#effect size
+es <- c(0, 0.2,0.5,0.8)
+#variance
+var1 <- c(3)
+var2 <- c(3,9)
+#distribution
+distr <- c("normal", "positive skew", "negative skew")
+#matrix(full factorial)
+Design <- expand.grid(sample1=sample1, sample2=sample2, es=es, var1=var1, var2=var2, distr=distr)
+
+```
+Data Generation
+```{r}
+MyDataGeneration <- function(sample1, sample2, es, var1, var2, distr){
+  if(distr=="normal"){
+    moments1 <- c(mean=0, variance=var1, skewness=0, kurtosis=3.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=0, kurtosis=3.0)
+  } 
+   if(distr=="positive skew") {
+    moments1 <- c(mean=0, variance=var1, skewness=0.5, kurtosis=5.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=0.5, kurtosis=5.0)
+  }
+  if(distr=="negative skew") {
+    moments1 <- c(mean=0, variance=var1, skewness=-0.5, kurtosis=5.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=-0.5, kurtosis=5.0)
+  }
+  gen1 <- rpearson(n=sample1, moments=moments1)
+  gen2 <- rpearson(n=sample2, moments=moments2)
+  Y <- c(gen1, gen2)
+  group <- as.factor(c(rep(1, times=length(gen1)), rep(2, times=length(gen2))))
+  SimData <- data.frame(Y,group)
+  return(SimData)
+}
+
+
+```
+Old Test
+```{r}
+#Welch´s T-test
+Method_old<- function(SimData){
+  formula <- Y~group
+  res <- t.test(formula, data = SimData)
+  return <- res
+}
+```
+
+Trimmed sample
+```{r}
+trim.sample <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med < (-K*mad(s))) | (s_minus_med > K*mad(s))) #identifies elements 
+  t <- s_minus_med[index]
+  t_plus_med <- t + median(s)
+  s_trim <- s.test[!s.test %in% t_plus_med]
+  return(s_trim)
+}
+```
+
+Trimming Proportions(g1,g2)
+```{r}
+#returns trimming proportion g1 (number of observations)
+trim.proportion.left <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med < (-K*mad(s)))) #identifies elements 
+  t <- s_minus_med[index]
+  return(length(t))
+}
+#returns g2
+trim.proportion.right <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med > K*mad(s))) #identifies elements 
+  t <- s_minus_med[index]
+  return(length(t))
+}
+```
+Winzorised sum of squared deviations for one sample
+```{r} 
+#update 23.04.2020
+SSDwin <- function(x){
+  #x= sample of any size
+  x.test <- sort(x)
+  n <- length(x.test)
+  x_trim <- sort(trim.sample(x.test))
+  g1 <- trim.proportion.left(x.test)
+  g2 <- trim.proportion.right(x.test)
+  max_x_trim <- max(x_trim)
+  hx <- length(x.test)-g1-g2
+  trim_mean_x <- sum(x_trim)/hx
+  step1 <- (g1+1)*((x_trim[1]-trim_mean_x)^2)
+  step2 <- sum((x_trim[2:length(x_trim)-1]-trim_mean_x)^2)
+  step3 <- ((g2+1)*(x_trim[max_x_trim]-trim_mean_x)^2)
+  step4 <- ((g1*(x_trim[1]-trim_mean_x))+(g2*(x_trim[max_x_trim]-trim_mean_x)))^2
+  ssd <- (step1+step2+step3+step4)/n
+  return(ssd)
+}
+
+```
+
+
+My New Test (Trimmed F-Test with winsorizd SSD)
+```{r}
+MyMethod_new <- function(SimData){
+  group1 <- filter(SimData, group==1)
+  group2 <- filter(SimData, group==2)
+  x<- sort(group1[,1])
+  y <- sort(group2[,1])
+  J <- 2 #number of groups
+  x_trim<- sort(trim.sample(x)) #sample after trimming
+  y_trim <- sort(trim.sample(y)) #sample after trimming
+  g1x <- trim.proportion.left(x)
+  g1y <- trim.proportion.left(y)
+  g2x <- trim.proportion.right(x)
+  g2y <- trim.proportion.right(y)
+  hx <- length(x) - g1x - g2x#sample size after trimming
+  hy <- length(y) -g1y - g2y
+  H <- sum(hx,hy)
+  trim_mean_x <- sum(x_trim)/hx
+  trim_mean_y <- sum(y_trim)/hy
+  mean_population <- ((hx*trim_mean_x)/H) + ((hy*trim_mean_y)/H)
+  nominator_x <- ((trim_mean_x - mean_population)^2) / (J-1)
+  nominator_y <- ((trim_mean_y - mean_population)^2) / (J-1)
+  nominator <- nominator_x + nominator_y
+  SSDx <- SSDwin(x=x)
+  SSDy <- SSDwin(x=y)
+  SSD_x_y <- sum(SSDx,SSDy)
+  denominator <- SSD_x_y/(H-J)
+  f <- as.matrix(nominator/denominator)
+  p_val_bigger <- pf(q=f, df1=(J-1), df2=(H-J), lower.tail=TRUE)
+  p_val_smaller <- pf(q=f, df1=(J-1), df2=(H-J),lower.tail=FALSE)
+  p_val_twosided <- 2*min(p_val_bigger,p_val_smaller)
+  p.value <- as.matrix(p_val_twosided)
+  results<- rbind(f,p.value)
+  return(results)
+}
+```
+
+
+My Simulation
+```{r}
+MySimulationCell<- function(Design = Design, RowOfDesign = 1, K = 2){
+  # Input arguments:
+  #Design = designmatrix
+  # RowOfDesign: number that refers to the row of the design matrix = one cell
+  # K: Total number of replications = number of data sets generated in one cell
+  #Create matrix or dataframe to store the results:
+  MyResult <- matrix(NA, nrow = K, ncol=2)
+  # Analyze data set with Method_new
+  tmp <- proc.time()
+  #create a loop over the replications k = 1 to K:
+  for (k in 1:K){
+    # Generate data
+    # set a random number seed to be able to replicate the result exactly
+    set.seed((k + 1000)*RowOfDesign)
+    SimDat <- do.call(MyDataGeneration, Design[RowOfDesign,] )
+    MyAnalysisResult1 <- MyMethod_new(SimDat)
+    #Analyze data set with Method_old
+    MyAnalysisResult2 <- Method_old(SimDat)
+    #Combine relevant results of the analysis by the two methods in a vector (optional)
+    MyAnalysisResult <- c(MyAnalysisResult1[2,], MyAnalysisResult2$p.value)
+    #Evaluate the analysis results of Method_new (Result1) and Mehtod_old (Result2)
+    P_old <- MyAnalysisResult2$p.value
+    P_new <- MyAnalysisResult1[2,]
+    #Evaluation
+    reject_old <- 0
+    reject_new <- 0
+      #Type I error
+      if(P_old < 0.05){
+        reject_old <- reject_old + 1
+      }
+    tryCatch({
+      if(P_new < 0.05){
+        reject_new <- reject_new + 1
+      }},
+        error=function(cond) {
+           browser()
+        }
+      )
+    #store the results in the right row k of your result matrix:
+    #We only store the second result which is the evaluation criterion
+    MyResult[k, ] <- c(reject_old,reject_new)
+  }
+  #save the time to run the analyses of K data sets in one cell of the design.
+  time <- proc.time() - tmp
+  attr(MyResult,'time')<-time
+  return(MyResult)
+}
+
+```
+For one Row, can be used as test run
+```{r}
+Row <- 1
+MyResult <- MySimulationCell(Design = Design, RowOfDesign = Row, K = 10 )
+```
+For all Rows
+```{r}
+TotalCells <- nrow(Design)
+magic_for(put, silent = T)
+for (i in 1:TotalCells){
+  Row <- i
+  MyResult <- MySimulationCell(Design = Design, RowOfDesign = Row, K = 5000)
+ put(MyResult)
+}
+MyResult <- magic_result()
+```
+Significance check for errors of Welch´s t-test and F-test with McNemar test. Result: Pvalue and, if significant, Sig= true
+```{r}
+#Nemar test which takes the calculated result per test from MyResult as inputs
+pVal <- function(Method1,Method2){
+  return(mcnemar.test(factor(Method1,levels=c(0,1)),factor(Method2,levels=c(0,1)))$p.value)
+}
+#keep in mind that 382 is the number of rows in design
+magic_for(put, silent=T)
+for(i in 1:TotalCells){
+Methods <- MyResult[["MyResult"]][[i]]
+Method1 <- Methods[,1]
+Method2 <- Methods[,2]
+pvalue <- pVal(Method1, Method2)
+put(pvalue)}
+pvalue <- magic_result_as_vector()
+pvalue[is.na(pvalue)] <- 9
+pvalue <- round(pvalue, digits=3)
+sig <- c(TRUE, FALSE)
+magic_for(put, silent=T)
+for(i in 1: length(pvalue)){
+  if(pvalue[i] < 0.05){
+    sig <- TRUE
+  }else{
+    sig <- FALSE
+  }
+  put(sig)
+}
+sig <- magic_result_as_vector()
+
+
+```
+
+
+My Evaluation, Calculation of Type I error and Power rates
+```{r}
+#Welch´s T-test
+magic_for(put, silent = T)
+for(i in 1:TotalCells){
+  ResultRow <- MyResult[["MyResult"]][[i]]
+  Column<- ResultRow[,1]
+  Amount_Error <- Column[Column==1]
+  Amount_Error <- length(Amount_Error)
+  Rate <- Amount_Error/(length(Column))
+  put(Rate)
+}
+number_reject_old <- magic_result_as_vector() #this is type I error rate for es = 0 and power for es != 0
+
+#Trimmed T Test
+magic_for(put, silent = T)
+for(i in 1:TotalCells){
+  ResultRow <- MyResult[["MyResult"]][[i]]
+  Column<- ResultRow[,2]
+  Amount_Error <- Column[Column==1]
+  Amount_Error <- length(Amount_Error)
+  Rate <- Amount_Error/(length(Column))
+  put(Rate)
+}
+number_reject_new <- magic_result_as_vector() #this is type I error rate for es = 0 and power for es != 0
+
+dif <- c(number_reject_old - number_reject_new)
+RateResults <- data.frame(number_reject_old,number_reject_new)
+fullRes <- cbind(Design, RateResults, pvalue,sig,dif)
+```
+
+
+```{r}
+save("fullRes", file="ResultsFullDesignRep5000.Rdata")
+```
+
+
+
