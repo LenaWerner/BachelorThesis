@@ -1,0 +1,190 @@
+---
+title: "Analysis Performance Ft"
+output: html_notebook
+---
+
+
+Preperation
+```{r}
+library(stats)
+library(PearsonDS)
+library(dplyr)
+library(magicfor)
+library(gsl)
+```
+Load functions
+```{r}
+MyDataGeneration <- function(sample1, sample2, es, var1, var2, distr){
+  if(distr=="normal"){
+    moments1 <- c(mean=0, variance=var1, skewness=0, kurtosis=3.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=0, kurtosis=3.0)
+  } 
+   if(distr=="positive skew") {
+    moments1 <- c(mean=0, variance=var1, skewness=0.5, kurtosis=5.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=0.5, kurtosis=5.0)
+  }
+  if(distr=="negative skew") {
+    moments1 <- c(mean=0, variance=var1, skewness=-0.5, kurtosis=5.0)
+    moments2 <- c(mean=0+(es*(sqrt(((sample1-1) *(var1)+(sample2-1)*(var2))/(sample1+sample2-2)))), variance=var2, skewness=-0.5, kurtosis=5.0)
+  }
+  gen1 <- rpearson(n=sample1, moments=moments1)
+  gen2 <- rpearson(n=sample2, moments=moments2)
+  Y <- c(gen1, gen2)
+  group <- as.factor(c(rep(1, times=length(gen1)), rep(2, times=length(gen2))))
+  SimData <- data.frame(Y,group)
+  return(SimData)
+}
+```
+```{r}
+trim.sample <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med < (-K*mad(s))) | (s_minus_med > K*mad(s))) #identifies elements 
+  t <- s_minus_med[index]
+  t_plus_med <- t + median(s)
+  s_trim <- s.test[!s.test %in% t_plus_med]
+  return(s_trim)
+}
+```
+```{r}
+trim.proportion.left <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med < (-K*mad(s)))) #identifies elements 
+  t <- s_minus_med[index]
+  return(length(t))
+}
+#returns g2
+trim.proportion.right <- function(s){
+  s.test <- s
+  s_minus_med <- s.test-median(s)
+  K <- 2.24 #multiplier of the median absolute deviation
+  index <- ((s_minus_med > K*mad(s))) #identifies elements 
+  t <- s_minus_med[index]
+  return(length(t))
+}
+```
+```{r}
+SSDwin <- function(x){
+  #x= sample of any size
+  x.test <- sort(x)
+  n <- length(x.test)
+  x_trim <- sort(trim.sample(x.test))
+  g1 <- trim.proportion.left(x.test)
+  g2 <- trim.proportion.right(x.test)
+  max_x_trim <- max(x_trim)
+  hx <- length(x.test)-g1-g2
+  trim_mean_x <- sum(x_trim)/hx
+  step1 <- (g1+1)*((x_trim[1]-trim_mean_x)^2)
+  step2 <- sum((x_trim[2:length(x_trim)-1]-trim_mean_x)^2)
+  step3 <- ((g2+1)*(x_trim[max_x_trim]-trim_mean_x)^2)
+  step4 <- ((g1*(x_trim[1]-trim_mean_x))+(g2*(x_trim[max_x_trim]-trim_mean_x)))^2
+  ssd <- (step1+step2+step3+step4)/n
+  return(ssd)
+}
+```
+```{r}
+MyMethod_new <- function(SimData){
+  group1 <- filter(SimData, group==1)
+  group2 <- filter(SimData, group==2)
+  x<- sort(group1[,1])
+  y <- sort(group2[,1])
+  J <- 2 #number of groups
+  x_trim<- sort(trim.sample(x)) #sample after trimming
+  y_trim <- sort(trim.sample(y)) #sample after trimming
+  g1x <- trim.proportion.left(x)
+  g1y <- trim.proportion.left(y)
+  g2x <- trim.proportion.right(x)
+  g2y <- trim.proportion.right(y)
+  hx <- length(x) - g1x - g2x#sample size after trimming
+  hy <- length(y) -g1y - g2y
+  H <- sum(hx,hy)
+  trim_mean_x <- sum(x_trim)/hx
+  trim_mean_y <- sum(y_trim)/hy
+  mean_population <- ((hx*trim_mean_x)/H) + ((hy*trim_mean_y)/H)
+  nominator_x <- ((trim_mean_x - mean_population)^2) / (J-1)
+  nominator_y <- ((trim_mean_y - mean_population)^2) / (J-1)
+  nominator <- nominator_x + nominator_y
+  SSDx <- SSDwin(x=x)
+  SSDy <- SSDwin(x=y)
+  SSD_x_y <- sum(SSDx,SSDy)
+  denominator <- SSD_x_y/(H-J)
+  f <- as.matrix(nominator/denominator)
+  p_val_bigger <- pf(q=f, df1=(J-1), df2=(H-J), lower.tail=TRUE)
+  p_val_smaller <- pf(q=f, df1=(J-1), df2=(H-J),lower.tail=FALSE)
+  p_val_twosided <- 2*min(p_val_bigger,p_val_smaller)
+  p.value <- as.matrix(p_val_twosided)
+  results<- rbind(f,p.value)
+  return(f)
+}
+```
+loop to produce 10.000 f-values
+```{r}
+set.seed(1020)
+magic_for(put, silent=TRUE)
+for(i in 1:10000){
+  SimData <-MyDataGeneration(100, 100, 0, 3,3,"normal")
+  f_value <- MyMethod_new(SimData)
+put(f_value)
+}
+Res <- magic_result_as_vector()
+```
+Plot f_vlaues in Histogram to see distribution
+```{r}
+hist(Res, col="salmon1")
+
+```
+p-vlaue distribution
+```{r}
+MyMethod_new <- function(SimData){
+  group1 <- filter(SimData, group==1)
+  group2 <- filter(SimData, group==2)
+  x<- sort(group1[,1])
+  y <- sort(group2[,1])
+  J <- 2 #number of groups
+  x_trim<- sort(trim.sample(x)) #sample after trimming
+  y_trim <- sort(trim.sample(y)) #sample after trimming
+  g1x <- trim.proportion.left(x)
+  g1y <- trim.proportion.left(y)
+  g2x <- trim.proportion.right(x)
+  g2y <- trim.proportion.right(y)
+  hx <- length(x) - g1x - g2x#sample size after trimming
+  hy <- length(y) -g1y - g2y
+  H <- sum(hx,hy)
+  trim_mean_x <- sum(x_trim)/hx
+  trim_mean_y <- sum(y_trim)/hy
+  mean_population <- ((hx*trim_mean_x)/H) + ((hy*trim_mean_y)/H)
+  nominator_x <- ((trim_mean_x - mean_population)^2) / (J-1)
+  nominator_y <- ((trim_mean_y - mean_population)^2) / (J-1)
+  nominator <- nominator_x + nominator_y
+  SSDx <- SSDwin(x=x)
+  SSDy <- SSDwin(x=y)
+  SSD_x_y <- sum(SSDx,SSDy)
+  denominator <- SSD_x_y/(H-J)
+  f <- as.matrix(nominator/denominator)
+  p_val_bigger <- pf(q=f, df1=(J-1), df2=(H-J), lower.tail=TRUE)
+  p_val_smaller <- pf(q=f, df1=(J-1), df2=(H-J),lower.tail=FALSE)
+  p_val_twosided <- 2*min(p_val_bigger,p_val_smaller)
+  p.value <- as.matrix(p_val_twosided)
+  results<- rbind(f,p.value)
+  return(p.value)
+}
+```
+loop do generate 10.000 p-values
+```{r}
+set.seed(1020)
+magic_for(put, silent=TRUE)
+for(i in 1:10000){
+  SimData <-MyDataGeneration(100, 100, 0, 3,3,"normal")
+  p_value <- MyMethod_new(SimData)
+put(p_value)
+}
+Res <- magic_result_as_vector()
+```
+histogram
+```{r}
+hist(Res, col="salmon2")
+```
+
